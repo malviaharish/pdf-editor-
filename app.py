@@ -1,70 +1,83 @@
-from fastapi import FastAPI, File, UploadFile, Form
-from fastapi.responses import StreamingResponse
-from fastapi.middleware.cors import CORSMiddleware
-from pypdf import PdfReader, PdfWriter
-import fitz  # PyMuPDF
 import io
 from typing import List
+from fastapi import FastAPI, File, Form, HTTPException, UploadFile
+from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import StreamingResponse
+from pypdf import PdfReader, PdfWriter
+import fitz  # PyMuPDF
 
-app = FastAPI(title="PDF Studio API")
+app = FastAPI(title="PDF Studio API", version="1.0.0")
 
-# --- IMPORTANT: CORS CONFIGURATION ---
-# This allows your Netlify frontend to talk to this Hugging Face backend.
-# Once you have your Netlify URL, replace "*" with your exact Netlify URL (e.g., "https://my-app.netlify.app")
+# CORS middleware allows your Netlify frontend (or local development) to call this API
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"], 
+    allow_origins=["*"],  # You can replace "*" with your exact Netlify domain later (e.g. "https://my-app.netlify.app")
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
 @app.get("/")
-def read_root():
-    return {"message": "PDF API is running! Send POST requests to /merge or /highlight."}
+def health_check():
+    return {"status": "ok", "message": "PDF Studio API is live on Render!"}
+
 
 @app.post("/merge")
 async def merge_pdfs(files: List[UploadFile] = File(...)):
-    """Merges multiple PDFs using pypdf."""
-    writer = PdfWriter()
-    
-    for file in files:
-        # Read the uploaded file into memory
-        pdf_bytes = await file.read()
-        reader = PdfReader(io.BytesIO(pdf_bytes))
-        writer.append_pages_from_reader(reader)
-        
-    # Save merged PDF to a buffer
-    buffer = io.BytesIO()
-    writer.write(buffer)
-    buffer.seek(0)
-    
-    return StreamingResponse(
-        buffer, 
-        media_type="application/pdf",
-        headers={"Content-Disposition": "attachment; filename=merged.pdf"}
-    )
+    """Merges two or more PDF files using pypdf."""
+    if len(files) < 2:
+        raise HTTPException(status_code=400, detail="Please upload at least 2 PDF files to merge.")
+
+    try:
+        writer = PdfWriter()
+        for file in files:
+            file_bytes = await file.read()
+            reader = PdfReader(io.BytesIO(file_bytes))
+            writer.append_pages_from_reader(reader)
+
+        output_buffer = io.BytesIO()
+        writer.write(output_buffer)
+        output_buffer.seek(0)
+
+        return StreamingResponse(
+            output_buffer,
+            media_type="application/pdf",
+            headers={"Content-Disposition": "attachment; filename=merged_document.pdf"}
+        )
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error merging PDFs: {str(e)}")
+
 
 @app.post("/highlight")
-async def highlight_pdf(file: UploadFile = File(...), search_text: str = Form(...)):
-    """Highlights specific text in a PDF using PyMuPDF."""
-    pdf_bytes = await file.read()
-    
-    # Open the PDF with PyMuPDF from memory
-    doc = fitz.open(stream=pdf_bytes, filetype="pdf")
-    
-    # Search and highlight
-    for page in doc:
-        text_instances = page.search_for(search_text)
-        for inst in text_instances:
-            page.add_highlight_annot(inst)
-            
-    # Save to buffer
-    buffer = io.BytesIO(doc.tobytes())
-    buffer.seek(0)
-    
-    return StreamingResponse(
-        buffer, 
-        media_type="application/pdf",
-        headers={"Content-Disposition": f"attachment; filename=highlighted.pdf"}
-    )
+async def highlight_pdf(
+    file: UploadFile = File(...),
+    search_text: str = Form(...)
+):
+    """Searches for target text and highlights all occurrences using PyMuPDF."""
+    if not search_text.strip():
+        raise HTTPException(status_code=400, detail="Search text cannot be empty.")
+
+    try:
+        file_bytes = await file.read()
+        doc = fitz.open(stream=file_bytes, filetype="pdf")
+
+        total_matches = 0
+        for page in doc:
+            matches = page.search_for(search_text)
+            for rect in matches:
+                page.add_highlight_annot(rect)
+                total_matches += 1
+
+        output_buffer = io.BytesIO(doc.tobytes())
+        output_buffer.seek(0)
+
+        return StreamingResponse(
+            output_buffer,
+            media_type="application/pdf",
+            headers={
+                "Content-Disposition": "attachment; filename=highlighted_document.pdf",
+                "X-Total-Matches": str(total_matches)
+            }
+        )
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error highlighting PDF: {str(e)}")
